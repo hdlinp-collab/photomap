@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -28,10 +29,11 @@ import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.tan
 
-/** 地圖上一個點：一張或多張靠在一起的相片。 */
-class PhotoCluster(val photos: List<Photo>, val lat: Double, val lon: Double) {
-    val cover: Photo get() = photos.first()
-}
+/**
+ * 地圖上一個點：一張或多張靠在一起的相片。
+ * [cover] 是標記上顯示的那張相片，標記就放在它真正的拍攝位置上。
+ */
+class PhotoCluster(val photos: List<Photo>, val cover: Photo)
 
 /**
  * 把相片依目前縮放等級分組（畫面上太近的合成一個點），
@@ -51,6 +53,8 @@ class PhotoClusterManager(
     private val border = 3 * density
     private val corner = 8 * density
     private val badgeR = 10 * density
+    private val pointerW = 14 * density
+    private val pointerH = 9 * density
 
     private val folder = FolderOverlay()
     private var points: List<Pt> = emptyList()
@@ -119,8 +123,10 @@ class PhotoClusterManager(
             var sx = 0.0; var sy = 0.0
             for (p in g) { sx += p.x; sy += p.y }
             val cx = sx / g.size; val cy = sy / g.size
-            if (!wrap && (cx < x0 - mx || cx > x1 + mx || cy < y0 - my || cy > y1 + my)) continue
-            clusters += PhotoCluster(g.map { it.photo }, invMercY(cy), invMercX(cx))
+            // 標記放在最接近群組中心的那張真實相片上，而不是平均位置
+            val center = g.minBy { (it.x - cx) * (it.x - cx) + (it.y - cy) * (it.y - cy) }
+            if (!wrap && (center.x < x0 - mx || center.x > x1 + mx || center.y < y0 - my || center.y > y1 + my)) continue
+            clusters += PhotoCluster(g.map { it.photo }, center.photo)
         }
         clusters.sortBy { it.photos.size } // 大的群組畫在最上面
 
@@ -130,7 +136,7 @@ class PhotoClusterManager(
         for (c in clusters) {
             val count = c.photos.size
             val marker = Marker(map).apply {
-                position = GeoPoint(c.lat, c.lon)
+                position = GeoPoint(c.cover.lat, c.cover.lon)
                 val icon = makeIcon(thumbs.get(c.cover.id), count)
                 setIcon(BitmapDrawable(context.resources, icon))
                 setAnchor(iconAnchorU(icon), iconAnchorV(icon))
@@ -154,19 +160,32 @@ class PhotoClusterManager(
         map.invalidate()
     }
 
+    // 對齊點 = 下方尖角的尖端，也就是相片的拍攝位置
     private fun iconAnchorU(icon: Bitmap) = (iconSize / 2) / icon.width
-    private fun iconAnchorV(icon: Bitmap) = (badgeR + iconSize / 2) / icon.height
+    private fun iconAnchorV(icon: Bitmap) = tipY() / icon.height
+    private fun tipY() = badgeR + iconSize + pointerH
 
-    /** 畫出「白框圓角縮圖 + 右上角數量」的標記圖示。 */
+    /** 畫出「白框圓角縮圖 + 下方尖角（指向拍攝點）+ 右上角數量」的圖釘式標記。 */
     private fun makeIcon(thumb: Bitmap?, count: Int): Bitmap {
         val w = (iconSize + badgeR * 1.6f).toInt()
-        val h = (iconSize + badgeR).toInt()
+        val h = (tipY() + 2 * density).toInt()
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
 
         val frame = RectF(0f, badgeR, iconSize, badgeR + iconSize)
-        canvas.drawRoundRect(frame, corner, corner, framePaint)
-        canvas.drawRoundRect(frame, corner, corner, outlinePaint)
+        val cx = iconSize / 2
+        val shape = Path().apply {
+            addRoundRect(frame, corner, corner, Path.Direction.CW)
+            val pointer = Path().apply {
+                moveTo(cx - pointerW / 2, frame.bottom - corner)
+                lineTo(cx + pointerW / 2, frame.bottom - corner)
+                lineTo(cx, tipY())
+                close()
+            }
+            op(pointer, Path.Op.UNION)
+        }
+        canvas.drawPath(shape, framePaint)
+        canvas.drawPath(shape, outlinePaint)
 
         val inner = RectF(frame.left + border, frame.top + border, frame.right - border, frame.bottom - border)
         val innerCorner = corner - border / 2
@@ -204,7 +223,5 @@ class PhotoClusterManager(
             val r = Math.toRadians(lat.coerceIn(-MAX_LAT, MAX_LAT))
             return (1.0 - ln(tan(r) + 1.0 / cos(r)) / PI) / 2.0
         }
-        fun invMercX(x: Double) = x * 360.0 - 180.0
-        fun invMercY(y: Double) = Math.toDegrees(kotlin.math.atan(kotlin.math.sinh(PI * (1 - 2 * y))))
     }
 }
