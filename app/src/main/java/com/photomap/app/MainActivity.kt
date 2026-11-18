@@ -26,12 +26,12 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.CustomZoomButtonsController
@@ -51,7 +51,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var thumbs: ThumbnailLoader
     private lateinit var clusters: PhotoClusterManager
 
+    /** 原始相片（WGS-84 座標）。 */
     private var photos: List<Photo> = emptyList()
+    /** 依目前底圖轉換過座標、實際畫在地圖上的相片。 */
+    private var displayPhotos: List<Photo> = emptyList()
+    private lateinit var style: MapStyle
     private var loadJob: Job? = null
     private var hideStatusJob: Job? = null
     private var loaded = false
@@ -88,6 +92,7 @@ class MainActivity : AppCompatActivity() {
         permissionPanel = findViewById(R.id.permissionPanel)
         grantButton = findViewById(R.id.grantButton)
 
+        style = loadStyle()
         setupMap()
         setupInsets()
 
@@ -95,6 +100,7 @@ class MainActivity : AppCompatActivity() {
         thumbs = ThumbnailLoader(applicationContext, lifecycleScope)
         clusters = PhotoClusterManager(map, thumbs, ::onClusterClick)
 
+        findViewById<FloatingActionButton>(R.id.styleFab).setOnClickListener { chooseStyle() }
         findViewById<FloatingActionButton>(R.id.fitFab).setOnClickListener { fitAll(animate = true) }
         findViewById<FloatingActionButton>(R.id.refreshFab).setOnClickListener {
             if (hasReadAccess()) loadPhotos() else requestPermissions()
@@ -120,12 +126,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupMap() {
-        map.setTileSource(TileSourceFactory.MAPNIK)
         map.setMultiTouchControls(true)
         map.isTilesScaledToDpi = true
         map.zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
         map.minZoomLevel = 2.0
-        map.maxZoomLevel = 19.0
+        applyStyleToMap()
         map.isVerticalMapRepetitionEnabled = false
         map.setScrollableAreaLimitLatitude(
             MapView.getTileSystem().maxLatitude, MapView.getTileSystem().minLatitude, 0,
@@ -156,6 +161,59 @@ class MainActivity : AppCompatActivity() {
             }
             insets
         }
+    }
+
+    // ---------- 底圖 ----------
+
+    private fun prefs() = getSharedPreferences("settings", MODE_PRIVATE)
+
+    private fun loadStyle(): MapStyle =
+        MapStyle.entries.firstOrNull { it.name == prefs().getString("map_style", null) } ?: MapStyle.AMAP
+
+    private fun applyStyleToMap() {
+        map.setTileSource(style.tileSource())
+        map.maxZoomLevel = style.maxZoom
+        findViewById<TextView>(R.id.credit).setText(style.creditRes)
+    }
+
+    private fun chooseStyle() {
+        val styles = MapStyle.entries
+        val labels = styles.map { getString(it.labelRes) }.toTypedArray()
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.map_style)
+            .setSingleChoiceItems(labels, styles.indexOf(style)) { dialog, which ->
+                dialog.dismiss()
+                val newStyle = styles[which]
+                if (newStyle == style) return@setSingleChoiceItems
+                // 保持畫面中心在同一個真實地點
+                val c = map.mapCenter
+                val real = if (style.gcj) gcjToWgsApprox(c.latitude, c.longitude) else doubleArrayOf(c.latitude, c.longitude)
+                style = newStyle
+                prefs().edit().putString("map_style", style.name).apply()
+                applyStyleToMap()
+                val shown = if (style.gcj) ChinaCoord.wgsToGcj(real[0], real[1]) else real
+                map.controller.setCenter(GeoPoint(shown[0], shown[1]))
+                updateDisplayPhotos()
+            }
+            .show()
+    }
+
+    /** GCJ-02 → WGS-84 的近似反算（誤差 1–2 公尺，只用於切換底圖時保持畫面位置）。 */
+    private fun gcjToWgsApprox(lat: Double, lon: Double): DoubleArray {
+        val g = ChinaCoord.wgsToGcj(lat, lon)
+        return doubleArrayOf(lat * 2 - g[0], lon * 2 - g[1])
+    }
+
+    private fun updateDisplayPhotos() {
+        displayPhotos = if (style.gcj) {
+            photos.map { p ->
+                val g = ChinaCoord.wgsToGcj(p.lat, p.lon)
+                p.copy(lat = g[0], lon = g[1])
+            }
+        } else {
+            photos
+        }
+        clusters.setPhotos(displayPhotos)
     }
 
     // ---------- 權限 ----------
@@ -217,7 +275,7 @@ class MainActivity : AppCompatActivity() {
         loadJob = lifecycleScope.launch {
             repository.scan().collect { state ->
                 photos = state.photos
-                clusters.setPhotos(state.photos)
+                updateDisplayPhotos()
                 if (!state.done) {
                     showStatus(
                         getString(R.string.scan_progress, state.scanned, state.total, state.photos.size),
@@ -253,13 +311,13 @@ class MainActivity : AppCompatActivity() {
 
     /** 把地圖縮放到可以看到所有相片。 */
     private fun fitAll(animate: Boolean) {
-        if (photos.isEmpty()) return
+        if (displayPhotos.isEmpty()) return
         if (map.width == 0 || map.height == 0) {
             map.post { fitAll(animate) }
             return
         }
         var n = -90.0; var s = 90.0; var e = -180.0; var w = 180.0
-        for (p in photos) {
+        for (p in displayPhotos) {
             if (p.lat > n) n = p.lat
             if (p.lat < s) s = p.lat
             if (p.lon > e) e = p.lon

@@ -13,5 +13,9 @@
     <string name="refresh">重新掃描</string>
     <string name="photos_count">%d 張相片</string>
     <string name="no_viewer">找不到可以開啟相片的應用程式</string>
+    <string name="map_style">底圖</string>
+    <string name="style_amap">高德地圖（中國大陸較詳細，自動校正火星座標）</string>
+    <string name="style_osm">OpenStreetMap（國際標準座標）</string>
+    <string name="credit_amap">© 高德地圖</string>
     <string name="osm_credit">© OpenStreetMap 貢獻者</string>
 </resources>
